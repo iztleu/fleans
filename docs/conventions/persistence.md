@@ -9,7 +9,7 @@ Two providers: **SQLite** (default, local dev) and **PostgreSQL** (production / 
 - **Connection strings:** SQLite uses `FLEANS_SQLITE_CONNECTION` / `FLEANS_QUERY_CONNECTION`. PostgreSQL uses `ConnectionStrings:fleans` (required) and `ConnectionStrings:fleans-query` (optional read replica — see [Reads from a replica](#reads-from-a-replica-fleans-query)).
 - **Journal store (#879):** `Persistence:Journal:Provider` (`Postgres` | `Citus` | `Sqlite`, empty = `Postgres`, or `Sqlite` on a SQLite main database without a journal connection), `Persistence:Journal:Citus:ShardCount` (default 128) and `ConnectionStrings:fleans-journal` (default = the main database) — see [Journal store](#journal-store-separate-database-citus).
 - **Migration strategy:** SQLite uses `EnsureCreated()`. PostgreSQL uses `MigrateAsync()` (migrations applied automatically by `Fleans.Api` on startup).
-- **Adding a column to an existing table:** generate a Postgres migration (`dotnet ef migrations add <Name> --project Fleans.Persistence.PostgreSql --context FleanCommandDbContext --output-dir Migrations/Command`; for the journal tables `--context FleanJournalDbContext --output-dir Migrations/Journal`). **Pre-1.0, skip the SQLite backfill** (`SqliteSchemaInitializer.AdditiveColumns`) — see the pre-1.0 rule in `CLAUDE.md`. `EnsureCreated()` is a no-op on an existing SQLite file, so after a schema change delete the stale dev DB (Aspire's `$TMPDIR/fleans-dev.db`, which E2E runs reuse) instead of hitting `no such column` at first query.
+- **Adding a column to an existing table:** generate a Postgres migration (`dotnet ef migrations add <Name> --project Fleans.Persistence.PostgreSql --context FleanCommandDbContext --output-dir Migrations/Command`; for the journal tables `--context FleanJournalDbContext --output-dir Migrations/Journal`). **Pre-1.0, SQLite has no schema backfill or data-upgrade path** — see the pre-1.0 rule in `CLAUDE.md`. The initializer creates the current schema on a fresh database and adds a context's missing tables when the journal shares the command database; it does not add columns to existing tables. After a schema change, stop all hosts using the stale dev DB (Aspire's `$TMPDIR/fleans-dev.db`, also reused by E2E), then recreate that database. This discards its dev data; retain a backup first if needed. Postgres migrations remain required to create the schema on a fresh database.
 - **Migrations live per-provider:** `Fleans.Persistence.Sqlite/Migrations/Command/` and `Fleans.Persistence.PostgreSql/Migrations/Command/`. Command-context migrations are maintained (command and query share the same database), plus the journal context's in `Fleans.Persistence.PostgreSql/Migrations/Journal/` (history table `__EFJournalMigrationsHistory`).
 
 ## Reads from a replica (`fleans-query`)
@@ -135,6 +135,12 @@ The journal and snapshots have their own context, `FleanJournalDbContext` (#879)
 ## User-task list filter pushdown (audit #415)
 
 `GetPendingUserTasks(assignee, candidateGroup, page)` pushes the assignee/candidateGroup filter to SQL on PostgreSQL via JSON-encoded `LIKE` patterns in raw SQL (`FromSqlInterpolated`); SQLite retains the existing in-memory filter.
+
+Listing pending user tasks requires a `PageRequest` and returns a `PagedResult<UserTaskResponse>`.
+The unused two-argument overload was removed (#749): it loaded every pending task before filtering.
+Do not reintroduce an unbounded listing. PostgreSQL filters, counts and paginates in SQL; SQLite still
+materializes the pending rows for its in-memory filtering fallback, so pagination alone does not make
+that provider's database read bounded.
 
 `EF.Functions.Like` against a value-converted column (the JSON-serialized `IReadOnlyList<string>`) is not usable — EF applies the value converter to the LIKE pattern constant. **Use `FromSqlInterpolated` for any future column-level JSON filter on the same pattern.**
 

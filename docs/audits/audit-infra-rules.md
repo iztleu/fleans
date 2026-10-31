@@ -116,16 +116,16 @@
 ## scalability/unpaged-getpendingusertasks-interface-overload
 - **dimension:** scalability
 - **severity:** important
-- **signal:** `WorkflowQueryService.GetPendingUserTasks(string?, string?)` (the 2-arg overload, `src/Fleans/Fleans.Persistence/WorkflowQueryService.cs:342-353`) calls `db.UserTasks.Where(t => t.TaskState != UserTaskLifecycleState.Completed).ToListAsync()` with no `Take`/page bound, then applies `ApplyUserTaskFilters` afterward in memory — distinct from the paged 3-arg overload, which already pushes down via `IUserTaskFilterStrategy` on Postgres.
-- **remediation:** Delete the overload if it remains callerless (currently zero production callers — `UserTasksController.cs` uses only the paged overload), or reimplement it by delegating to the paged overload with a bounded page size, mirroring `EfCoreEventStore.ReadEventsAsync`'s `_maxEventsPerLoad` guard. See issue #749.
+- **signal:** A `GetPendingUserTasks` overload without `PageRequest` is reintroduced on `IWorkflowQueryService` / `WorkflowQueryService` and materializes the full pending-task list before filtering. The paged method's SQLite in-memory fallback is a separate, accepted limitation; it must not trigger this rule by itself.
+- **remediation:** Require the paged query contract. The unused two-argument overload and its test stub were removed for #749; the REST controller already uses the paged method, with SQL filter/count/pagination pushdown on PostgreSQL.
 - **first seen:** 2026-08-24
 - **last matched:** 2026-08-31
 
 ## pluggability/aspire-missing-streaming-tuning-envs
 - **dimension:** pluggability
 - **severity:** important
-- **signal:** `charts/fleans/templates/_helpers.tpl` emits `Fleans__Streaming__Redis__TotalQueueCount` and `Fleans__Streaming__Kafka__QueueCount` from `values.yaml`, but `Fleans.Aspire/Program.cs`'s `WithStreaming` helper has no corresponding read/`WithEnvironment` call for either — grep `Program.cs` for `QueueCount` and confirm zero matches.
-- **remediation:** Add `FLEANS_STREAMING_REDIS_TOTAL_QUEUE_COUNT` / `FLEANS_STREAMING_KAFKA_QUEUE_COUNT` reads in `Program.cs` and stamp the corresponding env vars via `WithEnvironment` inside `WithStreaming`, following the explicit-default pattern already used for `coreRole`/`persistenceProvider`. See issue #750.
+- **signal:** A new or existing streaming queue-count knob is exposed in Helm but missing from Aspire, or is forwarded to Core without the same value reaching Worker and dev Plugin Host. Check both `builder.Configuration` reads and the provider-specific `WithEnvironment` calls in `WithStreaming`.
+- **remediation:** Keep Aspire and Helm tuning aligned. #750 wires `FLEANS_STREAMING_REDIS_TOTAL_QUEUE_COUNT` / `FLEANS_STREAMING_KAFKA_QUEUE_COUNT` (default `8`) through the shared helper; preserve that path for every silo role and future providers.
 - **first seen:** 2026-08-24
 - **last matched:** 2026-08-31
 
