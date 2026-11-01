@@ -128,6 +128,8 @@ on the install command line via `--set` or pass a `-f my-values.yaml` overlay.
 | `postgres.username` | `fleans` | Workflow user. |
 | `postgres.password` | `""` | Empty = chart auto-generates and stores in a `Secret`. |
 | `postgres.existingSecret` | `""` | Reference an existing `Secret` with key `postgres-password`. |
+| `postgres.maxConnections` | `250` | The bundled server's `max_connections`. `helm template` fails when the pods' pools can exceed it (see [Connection budget](/fleans/reference/persistence/#connection-budget)). |
+| `persistence.postgres.maxPoolSize.<workload>` | core `20`, worker `10`, api/web/mcp `5`, plugins `10` | Npgsql `Maximum Pool Size` per pod, appended to the bundled Postgres connection strings. `0` = Npgsql's default of 100. |
 | `postgres.persistentVolume.enabled` | `true` | Disable for ephemeral data; persistence requires a `StorageClass`. |
 | `postgres.persistentVolume.size` | `8Gi` | Size the PVC. |
 | `redis.enabled` | `true` | Needed while `clustering.provider`, `reminders.provider` or `streaming.provider` is `Redis` (the defaults). Set `false` once none is — see [Running without Redis](#running-without-redis). |
@@ -192,8 +194,10 @@ Create the `Secret` separately (out-of-band or via your secrets operator):
 ```bash
 kubectl create secret generic fleans-pg \
   -n fleans \
-  --from-literal=connection-string='Host=my-pg.example.com;Port=5432;Database=fleans;Username=fleans;Password=...;Ssl Mode=Require'
+  --from-literal=connection-string='Host=my-pg.example.com;Port=5432;Database=fleans;Username=fleans;Password=...;Ssl Mode=Require;Maximum Pool Size=20'
 ```
+
+Keep `Maximum Pool Size` in the string. Without it, each pod's pool can grow to 100 connections, and a few replicas exhaust the server's `max_connections`. Size it with the [connection budget](/fleans/reference/persistence/#connection-budget). The chart does not check an external server's limit.
 
 The Postgres user needs `CREATE TABLE` on first boot (for migrations), then
 only `INSERT/UPDATE/SELECT/DELETE` thereafter.
@@ -221,7 +225,7 @@ Create the database first; Fleans creates its tables on first boot. Every silo r
 share of the reminders every 5 minutes, so a separate database (on the same server or its own)
 keeps those reads off the workflow journal and read model. Without `existingSecret` the
 reminders share the `fleans` database. Plugin hosts (`plugins.*` or your own) must use the same provider — see
-[Hosting your own custom-task plugins](/fleans/guides/custom-worker-host/#configure-the-shared-reminder-service).
+[Hosting your own custom-task plugins](/fleans/guides/custom-worker-host/#the-shared-reminder-service).
 Switching providers starts with an empty reminder table: pending timers from the old provider
 do not move over.
 

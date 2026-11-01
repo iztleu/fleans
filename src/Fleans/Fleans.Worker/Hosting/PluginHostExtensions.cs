@@ -1,9 +1,11 @@
+using Fleans.Application.Abstractions.Events;
 using Fleans.Application.Placement;
 using Fleans.Worker.CustomTasks;
 using Fleans.Worker.Placement;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Orleans.Configuration;
 using Orleans.Hosting;
 using Orleans.Runtime;
 
@@ -27,6 +29,19 @@ public static class PluginHostExtensions
         // Every handler in the host's assemblies gets a task-type grain type, registered or not.
         siloBuilder.Services.AddCustomTaskGrainTypes();
         siloBuilder.AddFleansPlacementAssertion(configuration);
+        // The silo owns part of the reminder ring, so it must run the engine's reminder table (#788).
+        siloBuilder.AddFleansPluginReminders(configuration);
+        // The silo's pulling agents deliver custom-task events too: give them the engine's
+        // delivery window, or an event queued behind a long handler run is skipped after
+        // Orleans' 1-minute default (#850). A stream provider that sets its own window
+        // (Kafka's DeliveryRetryWindow) and is registered after this call still wins.
+        var deliveryWindow = configuration.GetValue<TimeSpan?>("Fleans:Streaming:MaxEventDeliveryTime")
+            ?? WorkflowEventStreams.DefaultMaxEventDeliveryTime;
+        siloBuilder.Services.Configure<StreamPullingAgentOptions>(WorkflowEventStreams.StreamProvider, o =>
+        {
+            o.MaxEventDeliveryTime = deliveryWindow;
+            o.StreamInactivityPeriod = WorkflowEventStreams.StreamInactivityPeriodFor(deliveryWindow);
+        });
         return siloBuilder;
     }
 

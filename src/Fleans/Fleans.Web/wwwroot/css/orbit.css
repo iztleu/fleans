@@ -5,9 +5,14 @@
    .orbit-app wrapper (not on body: FAST may write its root tokens inline on documentElement/body, and
    the nearest ancestor wins for inherited custom properties). */
 
-body {
-    --o-font: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+/* Font tokens live on :root (not body like the colour tokens): they don't change with the theme, and
+   app.css's html rule and the bpmn-js label fonts in bpmnTheme.js read them from there. */
+:root {
+    --o-font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
     --o-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+body {
 
     --o-bg: #F3F6FB;
     --o-surface: #FFFFFF;
@@ -1147,6 +1152,12 @@ body[data-theme$="dark"] {
 .properties-panel-body .stack-vertical > * {
     align-self: stretch;
     min-width: 0;
+}
+
+/* Keep long preference menus (notably Office accent colors) within smaller viewports. */
+.settings-preferences fluent-select::part(listbox) {
+    max-height: min(20rem, 40vh);
+    overflow-y: auto;
 }
 
 .properties-panel-body :is(fluent-text-field, fluent-text-area, fluent-select, fluent-combobox, fluent-number-field) {

@@ -15,6 +15,25 @@ public static class WorkflowEventStreams
     public const string StreamProvider = "StreamProvider";
 
     /// <summary>
+    /// Default pulling-agent <c>MaxEventDeliveryTime</c> for every silo that runs the stream
+    /// provider (engine and plugin hosts). Orleans retries one event for this long, then skips it
+    /// for good — implicit subscriptions are never faulted, so nothing records the skip. It must
+    /// outlast the longest handler run (a <c>rest-call</c> custom task may take 300 s); a custom-task
+    /// handler is keyed per task (#815), so only a redelivery of the same task waits behind it.
+    /// Orleans' own default is 1 minute (#850).
+    /// Overridden by <c>Fleans:Streaming:MaxEventDeliveryTime</c>.
+    /// </summary>
+    public static readonly TimeSpan DefaultMaxEventDeliveryTime = TimeSpan.FromMinutes(6);
+
+    /// <summary>
+    /// Pulling-agent <c>StreamInactivityPeriod</c> for a delivery window: how long a stream may stay
+    /// idle before the agent drops its cache entry (subscribers, cursor). Custom-task streams are
+    /// keyed per task (#815), so Orleans' 30-minute default would hold one entry per task started in
+    /// the last half hour. Twice the window keeps a stream whose event is still being retried.
+    /// </summary>
+    public static TimeSpan StreamInactivityPeriodFor(TimeSpan maxEventDeliveryTime) => maxEventDeliveryTime * 2;
+
+    /// <summary>
     /// Shared namespace prefix for engine-published events. Custom-task events use a dedicated
     /// namespace below to keep plugin handlers from being implicit-subscribed to other streams.
     /// Script tasks and conditions use no stream: the instance dispatches scripts to the
