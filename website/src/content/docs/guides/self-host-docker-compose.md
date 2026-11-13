@@ -25,17 +25,17 @@ The release workflow attaches `docker-compose-v<VER>.zip` to every GitHub
 Release. Download it via the `gh` CLI:
 
 ```bash
-gh release download v0.11.0 --repo nightBaker/fleans -p 'docker-compose-*.zip'
+gh release download v0.12.0 --repo nightBaker/fleans -p 'docker-compose-*.zip'
 ```
 
 Or, without the `gh` CLI, fetch the asset directly:
 
 ```bash
-curl -LO https://github.com/nightBaker/fleans/releases/download/v0.11.0/docker-compose-v0.11.0.zip
+curl -LO https://github.com/nightBaker/fleans/releases/download/v0.12.0/docker-compose-v0.12.0.zip
 ```
 
 :::note[Future-tag references]
-The literal `v0.11.0` above is the release this guide was written for. Substitute the
+The literal `v0.12.0` above is the release this guide was written for. Substitute the
 current release tag when you run these commands — see the
 [`docs/runbooks/release.md`](https://github.com/nightBaker/fleans/blob/main/docs/runbooks/release.md)
 runbook for the maintainer-side bump cadence.
@@ -50,7 +50,7 @@ for SVC in api web worker mcp; do
   cosign verify \
     --certificate-identity-regexp "https://github.com/nightBaker/fleans/.github/workflows/release.yml@refs/tags/v.*" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    ghcr.io/nightbaker/fleans-$SVC:0.11.0
+    ghcr.io/nightbaker/fleans-$SVC:0.12.0
 done
 ```
 
@@ -66,7 +66,7 @@ Each `cosign verify` exits 0 and prints a JSON object containing a `Bundle` bloc
 </figure>
 
 ```bash
-unzip docker-compose-v0.11.0.zip -d fleans
+unzip docker-compose-v0.12.0.zip -d fleans
 cd fleans
 docker compose up -d
 docker compose ps
@@ -80,7 +80,7 @@ docker compose ps
 | `fleans-core` | 8080 | 8081 | Orleans Core silo + REST API (`/workflow/*`) |
 | `fleans-mcp` | 8080 | (internal) | MCP server for AI-agent integration |
 | `fleans-worker` | (none) | (internal) | Worker silo (script/condition grains) |
-| `orleans-redis` | 6379 | (internal) | Orleans clustering + PubSub grain storage |
+| `orleans-redis` | 6379 | (internal) | Orleans clustering, reminders and stream queues |
 | `postgres` | 5432 | (internal) | Workflow event store + read model |
 | `compose-dashboard` | 18888 | (random) | Aspire dashboard for OTel traces (dev tool) |
 
@@ -137,10 +137,14 @@ docker compose exec -T postgres \
 
 Restore with `docker compose exec -T postgres psql -U postgres fleans < fleans-backup-YYYYMMDD.sql`.
 
-Redis (Orleans clustering + PubSub grain storage) is in-memory only — the
-bundle does not configure persistence on the Redis container. Orleans
-re-bootstraps cluster membership and PubSub state from Postgres + the Redis
-clustering provider on silo restart, so a Redis wipe is non-destructive.
+Redis holds Orleans cluster membership, reminders (pending BPMN timers) and the
+stream queues, and it is in-memory only — the bundle does not configure
+persistence on the Redis container. Membership rebuilds itself when the silos
+restart, but a Redis restart or wipe **loses pending timers and undelivered
+stream events**, so in-flight instances can stall. Restart Redis only with no
+instances in flight, or move reminders and streams off Redis for production
+(see [Configuration](/fleans/reference/configuration/)). There is no stream
+pub-sub state to lose: subscriptions are implicit only.
 **Never** wipe Postgres without a backup.
 
 `docker compose down -v` removes the Postgres volume. Use `docker compose down`

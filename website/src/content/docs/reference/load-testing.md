@@ -44,6 +44,17 @@ instance receives the signal and linear-10 keeps its start rate and latency. On 
 20 000 waiting instances the broadcast answered in 0.6 s, every instance received the signal within
 19 s, and linear-10 kept its start rate (start p95 19 ms → 163 ms during the broadcast). The pace is
 `Fleans:Signals:DeliveryConcurrency` (see [Configuration](/fleans/reference/configuration/#signals)).
+At 100 000 waiting instances on the default 512 MB worker, every instance received the signal within
+103 s, linear-10 kept its start rate (1 210 → 1 190 starts in 60 s) and its duration p99 stayed
+under a second (0.20 s → 0.50 s), and the instance lists caught up 165 s after the broadcast
+([#1011](https://github.com/nightBaker/fleans/issues/1011)).
+
+`long-lived` (k6 only, `tests/load/scripts/long-lived.js`) measures linear-10's start rate on an
+empty cluster, parks N instances on a message catch that never fires, and measures it again with
+all of them waiting. Pass: the start rate drops by no more than 10 %. On one laptop with 20 000
+waiting instances none was lost, and the start rate moved by 10–40 % between runs — as much as it
+moved on the same stack with no waiting instances at all, following the journal's append latency.
+A laptop cannot resolve the 10 % gate; the roadmap's target of 10 million needs the multi-node run.
 
 `throughput` (k6, `tests/load/scripts/throughput.js` + `throughput-ceiling.sh`) is the roadmap's headline metric: a constant start rate of a no-wait process — `load-linear-10` (10 script tasks) or `load-one-task` (Zeebe's benchmark process: one external task) — with completed instances per second and p50 / p99 process duration taken from the read model, plus CPU per service and database transactions per instance. A pre-release laptop run is summarised on the [roadmap](/fleans/roadmap/v1/#first-run-on-one-laptop-october-2026-pre-release).
 

@@ -22,6 +22,8 @@ k6 load test suite for the Fleans workflow engine.
 | `scripts/timers-1m-lag.sql` | Armed / fired counts and timer lag p50 / p99 for a `timers-1m` run | `psql … < scripts/timers-1m-lag.sql` |
 | `scripts/signal-fanout.js` | Scenario `signal-fanout`: one signal to N waiting instances while linear-10 runs (deploys its own fixtures) | [§ signal-fanout](#6-signal-fanout-one-signal-to-many-waiting-instances) |
 | `scripts/signal-fanout.sql` | Parked / received / waiting counts and linear-10 before vs during for a `signal-fanout` run | `psql … < scripts/signal-fanout.sql` |
+| `scripts/long-lived.js` | Scenario `long-lived`: linear-10's start rate on an empty cluster vs with N instances waiting on a message (deploys its own fixtures) | [§ long-lived](#8-long-lived-many-waiting-instances-then-linear-10) |
+| `scripts/long-lived.sql` | Parked / waiting counts and linear-10 starts, completions and duration p99 per window for a `long-lived` run | `psql … < scripts/long-lived.sql` |
 | `scripts/mi-fanout.js` | Scenario `mi-fanout`: one instance forks N parallel branches that each wait for a message (deploys its own fixture) | [§ mi-fanout](#7-mi-fanout-many-waiting-branches-in-one-instance) |
 | `scripts/mi-fanout.sql` | Journal batches, events and snapshot size of the instances of a `mi-fanout` run | `psql … < scripts/mi-fanout.sql` |
 | `scripts/throughput.js` | Roadmap headline metric: a constant start rate of a no-wait process (`load-linear-10` or `load-one-task`) | [§ throughput](#throughput-completed-instances-per-second-and-p99) |
@@ -48,6 +50,7 @@ k6 load test suite for the Fleans workflow engine.
 | `fixtures/one-task-workflow.bpmn` | `load-one-task` | Zeebe's reference benchmark process: start → one external `e2e-probe` task (completes after 50 ms) → end |
 | `fixtures/timers-workflow.bpmn` | `load-timers-00` … `load-timers-59` | Template for `timers-1m.js`: start → `timeDate` timer → end; the script fills in the process id and due time |
 | `fixtures/signal-fanout-workflow.bpmn` | `load-signal-fanout` | start → wait for the `loadFanout` signal → end (`signal-fanout.js`) |
+| `fixtures/long-lived-workflow.bpmn` | `load-long-lived` | start → wait for the `loadLongLived` message (correlation key `parkId`, never sent) → end (`long-lived.js`) |
 | `fixtures/mi-fanout-workflow.bpmn` | `load-mi-fanout` | start → parallel multi-instance sub-process (start → wait for the item's `loadMiFanout` message → end) → end (`mi-fanout.js`) |
 
 ## Docker Compose Setup
@@ -248,16 +251,15 @@ The roadmap's broadcast scenario (#976): park `K6_FANOUT_COUNT` instances on one
 before and a window from the broadcast on. **Pass:** every parked instance receives the signal, and
 linear-10 keeps its start rate and latency during the broadcast.
 
-The read-model projector runs on the worker and keeps one activation per parked instance, so the
-default 512 MB worker runs out of memory from ~10 000 parked instances — whichever way the signal is
-delivered — and the read model then stops recording completions. Start the stack with
-`overrides/signal-fanout.yml` (2 GB worker). `FLEANS_SIGNAL_DELIVERY_CONCURRENCY` sets
+The read-model projector runs on the worker, one per projector bucket (`Fleans:Projector:BucketCount`,
+64, #1011), so neither the parked instances nor the completion burst add projectors: the default
+512 MB worker runs 100 000. `FLEANS_SIGNAL_DELIVERY_CONCURRENCY` sets
 `Fleans:Signals:DeliveryConcurrency` on the silos (default 1).
 
 ```bash
 cd tests/load
 docker compose down -v
-docker compose -f docker-compose.yml -f overrides/signal-fanout.yml up -d --wait
+docker compose up -d --wait
 docker compose exec nginx nginx -s reload
 K6_TARGET_URL=http://localhost:80 K6_FANOUT_COUNT=20000 K6_FANOUT_RATE=150 K6_WINDOW_S=60 k6 run scripts/signal-fanout.js
 # a minute later, once the projector has caught up:
@@ -292,6 +294,35 @@ versions), because the read model fell minutes behind. linear-10 was **not** una
 The worker (read-model projector next to the script executor) sat at 500–730 % CPU while the cores
 and Citus stayed at 15–30 %: projector capacity is the limit, tracked in #1011.
 
+**#1011, 2026-11-12** (same laptop, 100 000 parked at 150/s, `DeliveryConcurrency` 1, linear-10 at
+20/s; counts from `signal-fanout.sql`):
+
+| Build | Worker | Parked / received | linear-10 starts before → during | linear-10 failed starts | linear-10 duration p99 before → during | Worker peak | Delivery spread |
+|---|---|---:|---|---:|---|---:|---:|
+| main @ `0db949fe` | 6 GB | 99 441 / 99 441 | 1 208 → 955 (−21 %) | 238 | 0.09 s → 14.5 s | 2.98 GB | 192 s |
+| #1011 | 512 MB | 96 794 / 96 792 | 1 212 → 815 (−33 %) | 372 | 0.23 s → 120 s | 512 MB, out of memory in the burst | 252 s |
+| #1011 | 2 GB | 97 251 / 97 251 | 1 213 → 1 186 (−2 %) | 2 | 0.15 s → 6.3 s | 1.25 GB | 372 s |
+| #1011, projectors never idle (`IdleDeactivation` 30 min) | 6 GB | 98 815 / 98 815 | 1 218 → 634 (−48 %) | 547 | 1.4 s → 23 s | 1.98 GB | 826 s |
+| #1011, bucket projectors (64) @ `3793b3a8` | 512 MB | 99 980 / 99 980 | 1 210 → 1 190 (−2 %) | 0 | 0.20 s → 0.50 s | 397 MB | 103 s |
+
+- On main, the worker's CPU during the burst went mostly to journal reads failing: every
+  notification started a journal read at once, far more than the worker's journal pool holds (10).
+  Each read waited for a connection, failed after the pool timeout, was logged in full by EF on the
+  console and was redelivered. `Fleans:Projector:MaxConcurrentReplays` (default 8) now queues those
+  reads in the projector instead. The worker also logs at `Warning`, like the API host; it used to
+  log every EF command at `Information`.
+- Idle projectors leaving memory is better on both counts: last row against the 2 GB one.
+- Up to the idle-projector rows, linear-10's duration p99 during the burst stayed in seconds (6.3 s
+  at best), and the core silos logged tens of thousands of `Message expired before placement could
+  complete for grain workflowinstanceprojector` (Orleans 101038 / 100071): with one stream per
+  instance the pulling agents addressed a projector for every completed instance at once, and
+  placement on the worker could not keep up.
+- **Bucket projectors** (last row): `InstanceAdvanced` goes to the stream of one of 64 buckets, and
+  one projector per bucket serves its instances — the #976 move for `SignalDeliveryPage`. No
+  placement expiry was logged, linear-10's p99 stayed at 0.5 s with no failed start, and the
+  default 512 MB worker peaked at 397 MB and 123 % CPU. The read model was caught up 165 s after
+  the broadcast (delivery itself took 103 s), so 64 serial buckets kept pace with the burst.
+
 ### 7. `mi-fanout`: many waiting branches in one instance
 
 One instance forks `K6_MI_SIZES` parallel multi-instance branches (one instance per size, one at a time), and each branch waits for its own message (#861). Every subscription persists before its external call, all in the start's turn, so N branches mean N appends in one grain call. The call is the start: **pass** is a 200 within the 30 s grain-call timeout with every branch waiting, and completion once every message is delivered.
@@ -322,6 +353,63 @@ Laptop run, 2026-11-06 (10-CPU / 12 GB Docker VM, default stack, nothing else ru
 - **A start that times out keeps running.** The 5 000 and 8 000 instances went on to subscribe every branch, but the caller got a 500 and no instance id, and a retry would start a second instance.
 - **Delivery grows about cubically,** and is the larger cost: each message is one turn of the instance (about 20 ms at 1 000 branches, 148 ms at 3 000), and those turns rescan state. `CompleteFinishedSubProcessScopes` calls `GetEntriesInScope`, a scan of all entries, per active scope host: about 60 ms per call at 2 000–3 000 branches, measured alone. It explains a large share, not necessarily all of it.
 - Each instance's first batch over `MaxEventsPerLoad` logs one 4072 on the projector, whose replay finds no snapshot yet. The stream redelivers it, and the read model caught up in every run.
+
+### 8. `long-lived`: many waiting instances, then linear-10
+
+The roadmap's waiting-instances scenario (#973): measure linear-10's start rate on an empty cluster,
+park `K6_PARK_COUNT` instances on a message catch that never fires (default 10 000 000, each with
+its own `parkId` correlation key), then measure the start rate again with all of them waiting.
+**Pass:** the start rate with the parked instances drops by no more than 10 %, and none of them is
+lost (all still waiting).
+
+The start rate is a closed model: `K6_LINEAR_VUS` VUs start linear-10 back to back for
+`K6_WINDOW_S` in each window, so accepted starts per window is the rate the cluster sustains. A
+`K6_WARMUP_S` warm-up runs first under its own key (`load-linear-10-warmup`), so a cold cluster does
+not lower the empty window. At saturation the admission limiter (`Fleans:Admission`) answers some
+starts 429: those count as `linear_rejected`, not as failed requests, and only accepted starts are
+compared. The k6 summary ends with one line: starts/s empty → loaded, the drop, PASS / FAIL and the
+429s per window.
+
+As in `signal-fanout`, the read-model projector keeps one activation per waiting instance on the
+worker (#1011): start the stack with `overrides/signal-fanout.yml` (2 GB worker).
+
+```bash
+cd tests/load
+docker compose down -v
+docker compose -f docker-compose.yml -f overrides/signal-fanout.yml up -d --wait
+docker compose exec nginx nginx -s reload
+K6_TARGET_URL=http://localhost:80 K6_PARK_COUNT=20000 K6_PARK_RATE=150 k6 run scripts/long-lived.js
+# 30 s later, once linear-10 has drained:
+docker compose exec -T postgres psql -U postgres -d fleans < scripts/long-lived.sql
+# parked | waiting | failed | first_parked | last_parked
+# phase | started | completed | completed_per_s | duration_p99_s     (linear-10, empty / loaded)
+```
+
+Keep `K6_PARK_RATE` low enough that parking is not answered 429 (150/s on a laptop): only accepted
+starts are parked. At the default 1 000/s, 10 M takes about 2 h 47 min. Knobs: `K6_PARK_RATE`
+(default 1 000), `K6_LINEAR_VUS` (default 20), `K6_WINDOW_S` (default 120), `K6_WARMUP_S` (default
+60), `K6_SETTLE_S` (pause between the phases, default 30), `K6_PARK_MAX_VUS` (default 1 000).
+
+Laptop runs, 2026-11-12 (10-CPU / 12 GB Docker VM, 2 GB worker, 20 000 requested, linear-10 with 20
+VUs, two fresh stacks with the same settings):
+
+| Run | Parked (all still waiting) | linear-10 starts/s empty → loaded | Drop | 429 empty / loaded | Start avg empty → loaded | Duration p99 empty → loaded |
+|---|---:|---|---:|---|---|---|
+| 1 | 19 600 | 227.7 → 204.1 | 10.3 % | 0 / 4 243 | 88 ms → 83 ms | 1.75 s → 2.12 s |
+| 2 | 19 957 | 267.3 → 161.0 | 39.8 % | 0 / 0 | 75 ms → 124 ms | 0.73 s → 1.26 s |
+
+**Not a pass, and not a measured effect of the waiting instances either.** Every parked instance
+stayed waiting and none failed. The drop sits inside the stack's own window-to-window spread:
+a control run on a fresh stack with the same windows and **no** parked instances (2026-11-12, same
+laptop) went 130 → 62 → 104 → 82 → 88 → 129 starts/s. In every window, with or without parked
+instances, the start rate tracked the journal append latency on the Citus coordinator
+(`INSERT INTO "WorkflowEventBatches"`, `pg_stat_statements`): ~14 appends are in flight at any
+time, 11 per linear-10 instance, so starts/s ≈ 14 / (11 × append latency) — 9.6 ms → 130/s,
+18.6 ms → 62/s; the loaded window of run 2 was 10.0 ms → 118/s. The append latency moved with CPU
+contention on the host (the Docker VM uses all 10 cores, shared with everything else on the
+laptop), not with the parked instances; idle collection and stream inactivity (2–15 min) made no
+difference either. A laptop run cannot resolve a 10 % gate: run it on dedicated hosts (#974), and
+read the append latency next to the start rate.
 
 ## Completed instances per second and p99 process duration
 
@@ -428,4 +516,5 @@ there with its `report.md`. Overrides a report needs to reproduce its rows stay 
 - Issue #244 — Cloud validation run
 - Issues #866, #867, #868, #869 (and #846, #857) — findings from the `long-diverse` run on the split-roles Kafka stack
 - Issue #886 — `timers-1m`, reminders on their own Postgres
+- Issue #973 — `long-lived` and `signal-fanout` scenarios
 - Issues #902, #903 — regressions found by the 2026-10-23 run (late timers, lower start throughput)

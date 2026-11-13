@@ -53,6 +53,10 @@ namespace Fleans.Application
                     $"Fleans:Projector:MaxBatchSize must be between 1 and {ProjectorOptions.MaxBatchSizeLimit}.")
                 .Validate(o => o.MaxBatchDelayMs >= 0, "Fleans:Projector:MaxBatchDelayMs can't be negative.")
                 .Validate(o => o.MaxConcurrentBatches >= 1, "Fleans:Projector:MaxConcurrentBatches must be at least 1.")
+                .Validate(o => o.BucketCount is >= 1 and <= ProjectorOptions.MaxBucketCount,
+                    $"Fleans:Projector:BucketCount must be between 1 and {ProjectorOptions.MaxBucketCount}.")
+                .Validate(o => o.MaxConcurrentReplays is >= 1 and <= ProjectorOptions.MaxConcurrentReplaysLimit,
+                    $"Fleans:Projector:MaxConcurrentReplays must be between 1 and {ProjectorOptions.MaxConcurrentReplaysLimit}.")
                 .ValidateOnStart();
 
             services.AddOptions<ExternalTaskOptions>()
@@ -70,6 +74,7 @@ namespace Fleans.Application
             services.AddSingleton<WorkflowDefinitionCache>();
             services.AddSingleton<WorkflowExpressionValidator>();
             services.AddSingleton<ProjectionBatcher>();
+            services.AddSingleton<ProjectionReplaySlots>();
             services.TryAddSingleton(TimeProvider.System);
             services.AddSingleton<StartEventSubscriptionCache>();
             services.AddSingleton<StartEventLauncher>();
